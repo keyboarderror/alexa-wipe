@@ -1,0 +1,11 @@
+# Copy this file to setup.yaml (which is gitignored) and fill in real values.
+
+email: your.amazon.email@example.com
+password: "your-amazon-password"
+
+# Base32 TOTP secret from Amazon's 2FA QR code (the "secret=" parameter of the
+# otpauth:// URI). Leave empty/null if your account has 2FA off.
+totp_secret: "ABCDEFGHIJKLMNOP"
+
+# de | com | co.uk — drives https://alexa.amazon.<region>
+region: de
