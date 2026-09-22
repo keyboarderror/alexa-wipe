@@ -94,6 +94,38 @@ def _delete_all(ctx: alexa_client.ClientContext, inventory: dict[str, list[Entit
     return deleted, failed
 
 
+def _verify(ctx: alexa_client.ClientContext, inventory: dict[str, list[Entity]]) -> bool:
+    """Re-read from the server and report what really went.
+
+    A 2xx is not proof: Amazon answers HTTP 299 on retired endpoints and 200
+    with an empty body for an id it does not recognise, so a run can report
+    every item deleted while the account is untouched.
+    """
+    endpoints.invalidate_caches(ctx)
+    print("\nVerifying against a fresh listing ...")
+    all_good = True
+    for kind in KINDS_ORDER:
+        before = inventory.get(kind) or []
+        if not before:
+            continue
+        try:
+            after = endpoints.KIND_LIST[kind](ctx)
+        except Exception as exc:  # noqa: BLE001 - verification must not mask the run
+            print(f"  {KINDS_DISPLAY[kind]}: could not re-check ({exc!r})")
+            all_good = False
+            continue
+        gone = len(before) - len(after)
+        print(f"  {KINDS_DISPLAY[kind]}: {len(before)} -> {len(after)}  ({gone} removed)")
+        if gone <= 0:
+            all_good = False
+    if not all_good:
+        print(
+            "\n  Some items are still on the server despite a 2xx response.\n"
+            "  Do not re-run blindly - the delete is being accepted and ignored."
+        )
+    return all_good
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     if not args.config.exists():
@@ -116,7 +148,9 @@ def main(argv: list[str] | None = None) -> int:
     deleted, failed = _delete_all(ctx, inventory)
     total = deleted + failed
     print(f"\nDeleted {deleted} of {total}. {failed} failed.")
-    return 0 if failed == 0 else 1
+
+    verified_ok = _verify(ctx, inventory)
+    return 0 if failed == 0 and verified_ok else 1
 
 
 if __name__ == "__main__":

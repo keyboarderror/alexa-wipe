@@ -71,8 +71,12 @@ cp setup.example.yaml setup.yaml
 ```
 
 `setup.yaml` is gitignored. Password and TOTP are used only to auto-fill the
-login form inside the proxy — you can leave them blank and type manually in
-the browser if you prefer.
+login form inside the proxy — you still complete the sign-in yourself.
+
+`email`, `password` and `region` are **required**: `load_config` exits if any of
+them is missing or empty. Only `totp_secret` may be omitted — leave it as
+unquoted `null` (or blank, or delete the line) when 2FA is off. Quoting it as
+`"null"` makes it a literal four-character secret.
 
 ### setup.yaml
 

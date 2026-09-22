@@ -5,6 +5,14 @@ source of truth is /api/behaviors/entities?skillId=amzn1.ask.1p.smarthome,
 which returns a flat array of everything: appliances, scenes, and groups,
 classified by providerData.categoryType.
 
+Devices are the exception. /api/behaviors/entities identifies an appliance by a
+bare UUID, but DELETE /api/phoenix/appliance/<id> expects the *legacy*
+applianceId (e.g. "AAA_SonarCloudService_<uuid>_7"). Handed a UUID it does not
+recognise, that endpoint answers HTTP 200 with an empty body and does nothing -
+so deletes appear to succeed while the account is unchanged. Devices are
+therefore listed through /nexus/v1/graphql, the same query the Alexa app uses,
+which returns legacyAppliance.applianceId alongside the friendly name.
+
 Groups also appear at /api/phoenix/group with their legacy `groupId` form
 (amzn1.HomeAutomation.ApplianceGroup.<accountId>.<uuid>) — that's still the
 right URL for DELETE.
@@ -24,6 +32,22 @@ from alexa_client import ClientContext
 _RATE_LIMIT_SLEEP = 0.3
 _MAX_RETRIES_429 = 3
 _ENTITIES_PATH = "/api/behaviors/entities?skillId=amzn1.ask.1p.smarthome"
+_GRAPHQL_PATH = "/nexus/v1/graphql"
+
+_GRAPHQL_ENDPOINTS_QUERY = """
+query CustomerSmartHome {
+    endpoints(endpointsQueryParams: { paginationParams: { disablePagination: true } }) {
+        items {
+            friendlyName
+            legacyAppliance {
+                applianceId
+                friendlyDescription
+                manufacturerName
+            }
+        }
+    }
+}
+"""
 
 
 @dataclass
@@ -42,7 +66,30 @@ class DeleteError(RuntimeError):
 
 
 def list_devices(ctx: ClientContext) -> list[Entity]:
-    return [_entity_from_behavior(e) for e in _entities(ctx) if _category(e) == "APPLIANCE"]
+    """Devices, identified by the legacy applianceId that DELETE requires.
+
+    Uses /nexus/v1/graphql rather than /api/behaviors/entities: the latter's
+    UUIDs are silently ignored by the delete endpoint (see module docstring).
+    """
+    out: list[Entity] = []
+    for item in _graphql_endpoints(ctx):
+        legacy = item.get("legacyAppliance") or {}
+        appliance_id = legacy.get("applianceId")
+        if not appliance_id:
+            # Nothing we can delete without it; skip rather than pretend.
+            continue
+        manufacturer = (legacy.get("manufacturerName") or "").strip()
+        description = (legacy.get("friendlyDescription") or "").strip()
+        extra = "; ".join(x for x in (manufacturer, description) if x)
+        out.append(
+            Entity(
+                id=appliance_id,
+                name=item.get("friendlyName") or legacy.get("friendlyName") or "(unnamed)",
+                extra=extra,
+                raw=item,
+            )
+        )
+    return out
 
 
 def list_scenes(ctx: ClientContext) -> list[Entity]:
@@ -125,6 +172,41 @@ KIND_DELETE: dict[str, Callable[[ClientContext, str], None]] = {
 # ---------- internals ----------
 
 _ENTITIES_CACHE_KEY = "_entities_cache"
+_GRAPHQL_CACHE_KEY = "_graphql_cache"
+
+
+def _graphql_endpoints(ctx: ClientContext) -> list[dict]:
+    cache = getattr(ctx, _GRAPHQL_CACHE_KEY, None)
+    if cache is not None:
+        return cache
+    resp = ctx.session.post(
+        f"{ctx.base_url}{_GRAPHQL_PATH}",
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        json={"query": _GRAPHQL_ENDPOINTS_QUERY},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise SystemExit(
+            f"POST {_GRAPHQL_PATH} returned {resp.status_code}: {resp.text[:300]}"
+        )
+    try:
+        data = resp.json()
+    except Exception:
+        raise SystemExit(
+            f"POST {_GRAPHQL_PATH} returned non-JSON: {resp.text[:300]}"
+        )
+    if data.get("errors"):
+        raise SystemExit(f"{_GRAPHQL_PATH} errors: {data['errors']}")
+    items = ((data.get("data") or {}).get("endpoints") or {}).get("items") or []
+    setattr(ctx, _GRAPHQL_CACHE_KEY, items)
+    return items
+
+
+def invalidate_caches(ctx: ClientContext) -> None:
+    """Drop cached listings so the next call re-reads from the server."""
+    for key in (_ENTITIES_CACHE_KEY, _GRAPHQL_CACHE_KEY):
+        if hasattr(ctx, key):
+            delattr(ctx, key)
 
 
 def _entities(ctx: ClientContext) -> list[dict]:
